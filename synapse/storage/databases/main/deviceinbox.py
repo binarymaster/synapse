@@ -159,7 +159,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
         else:
             return {}, to_stream_id
 
-        def get_new_messages_txn(txn):
+        def get_new_messages_txn(txn: LoggingTransaction):
             # Build a query to select messages from any of the given users that are between
             # the given stream id bounds
             sql = "SELECT stream_id, user_id, device_id, message_json FROM device_inbox"
