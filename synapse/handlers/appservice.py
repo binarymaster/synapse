@@ -499,8 +499,11 @@ class ApplicationServicesHandler:
             users: The users that should receive new to-device messages.
 
         Returns:
-            A list of JSON dictionaries containing data derived from the typing events that
-            should be sent to the given application service.
+            A two-tuple containing the following:
+                * A list of JSON dictionaries containing data derived from the typing events
+                  that should be sent to the given application service.
+                * The last-processed to-device message's stream id. If this does not equal
+                  `new_token` then there are likely more events to send.
         """
         # Get the stream token that this application service has processed up until
         from_key = await self.store.get_type_stream_id_for_appservice(
