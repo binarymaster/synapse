@@ -162,7 +162,6 @@ class DeviceInboxWorkerStore(SQLBaseStore):
         def get_new_messages_txn(txn: LoggingTransaction):
             # Build a query to select messages from any of the given users that are between
             # the given stream id bounds
-            sql = "SELECT stream_id, user_id, device_id, message_json FROM device_inbox"
 
             # Scope to only the given users. We need to use this method as doing so is
             # different across database engines.
@@ -170,12 +169,13 @@ class DeviceInboxWorkerStore(SQLBaseStore):
                 self.database_engine, "user_id", user_ids
             )
 
-            sql += (
-                " WHERE %s"
-                " AND ? < stream_id AND stream_id <= ?"
-                " ORDER BY stream_id ASC"
-                " LIMIT ?"
-            ) % many_clause_sql
+            sql = f"""
+                SELECT stream_id, user_id, device_id, message_json FROM device_inbox
+                WHERE {many_clause_sql}
+                AND ? < stream_id AND stream_id <= ?
+                ORDER BY stream_id ASC
+                LIMIT ?
+            """
 
             txn.execute(sql, (*many_clause_args, from_stream_id, to_stream_id, limit))
 
