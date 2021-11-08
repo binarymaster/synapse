@@ -243,15 +243,6 @@ class ApplicationServicesHandler:
         # Additional context: https://github.com/matrix-org/synapse/pull/11137
         assert isinstance(new_token, int)
 
-        # Ignore any unsupported streams
-        if stream_key not in (
-            "typing_key",
-            "receipt_key",
-            "presence_key",
-            "to_device_key",
-        ):
-            return
-
         # Ignore to-device messages if the feature flag is not enabled
         if (
             stream_key == "to_device_key"
