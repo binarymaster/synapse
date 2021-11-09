@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import abc
 import logging
 from typing import TYPE_CHECKING, Awaitable, Callable, Dict, Iterable, Optional
 
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.storage.types import Connection
 from synapse.types import JsonDict
-from synapse.util import json_encoder
+from synapse.util import Clock, json_encoder
 
 from . import engines
 
@@ -26,6 +27,73 @@ if TYPE_CHECKING:
     from synapse.storage.database import DatabasePool, LoggingTransaction
 
 logger = logging.getLogger(__name__)
+
+
+class BackgroundUpdateController(abc.ABC):
+    """A base class for controlling background update timings."""
+
+    ####
+    # NOTE: This is used by modules so changes must be backwards compatible or
+    # be announced appropriately
+    ####
+
+    @abc.abstractmethod
+    async def iteration(self) -> int:
+        """Called before we do the next iteration of a background update,
+        returning the target duration the update should take.
+
+        Implementations will likely want to sleep for a period of time to stop
+        the background update from continuously being run.
+
+        Returns:
+            The target duration in milliseconds that the background update
+            should run for.
+
+            Note: this is a *target*, and an iteration may take substantially
+            longer or shorter.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def default_batch_size(self) -> int:
+        """The batch size to use for the first iteration of a new background
+        update.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def min_batch_size(self) -> int:
+        """A lower bound on the batch size of a new background update.
+
+        Used to ensure that progress is always made. Must be greater than 0.
+        """
+        ...
+
+
+class _TimeBasedBackgroundUpdateController(BackgroundUpdateController):
+    """The default controller which aims to spend X ms doing the background
+    update every Y ms.
+    """
+
+    MINIMUM_BACKGROUND_BATCH_SIZE = 100
+    DEFAULT_BACKGROUND_BATCH_SIZE = 100
+
+    BACKGROUND_UPDATE_INTERVAL_MS = 1000
+    BACKGROUND_UPDATE_DURATION_MS = 100
+
+    def __init__(self, clock: Clock):
+        self._clock = clock
+
+    async def iteration(self) -> int:
+        await self._clock.sleep(self.BACKGROUND_UPDATE_INTERVAL_MS / 1000)
+
+        return self.BACKGROUND_UPDATE_DURATION_MS
+
+    async def default_batch_size(self) -> int:
+        return self.DEFAULT_BACKGROUND_BATCH_SIZE
+
+    async def min_batch_size(self) -> int:
+        return self.MINIMUM_BACKGROUND_BATCH_SIZE
 
 
 class BackgroundUpdatePerformance:
@@ -82,17 +150,14 @@ class BackgroundUpdater:
     process and autotuning the batch size.
     """
 
-    MINIMUM_BACKGROUND_BATCH_SIZE = 100
-    DEFAULT_BACKGROUND_BATCH_SIZE = 100
-    BACKGROUND_UPDATE_INTERVAL_MS = 1000
-    BACKGROUND_UPDATE_DURATION_MS = 100
-
     def __init__(self, hs: "HomeServer", database: "DatabasePool"):
         self._clock = hs.get_clock()
         self.db_pool = database
 
         # if a background update is currently running, its name.
         self._current_background_update: Optional[str] = None
+
+        self._controller = _TimeBasedBackgroundUpdateController(self._clock)
 
         self._background_update_performance: Dict[str, BackgroundUpdatePerformance] = {}
         self._background_update_handlers: Dict[
@@ -106,13 +171,24 @@ class BackgroundUpdater:
     async def run_background_updates(self, sleep: bool = True) -> None:
         logger.info("Starting background schema updates")
         while True:
-            if sleep:
-                await self._clock.sleep(self.BACKGROUND_UPDATE_INTERVAL_MS / 1000.0)
+            try:
+                if sleep:
+                    target_duration_ms = await self._controller.iteration(sleep=sleep)
+                else:
+                    # If we're not sleeping then no point going via the
+                    # controller, we just pick an arbitrary duration.
+                    target_duration_ms = 100
+            except Exception:
+                wait_for_seconds = 30
+                logger.exception(
+                    "Error call background update controller. Waiting for %d seconds before trying again.",
+                    wait_for_seconds,
+                )
+                await self._clock.sleep(wait_for_seconds)
+                continue
 
             try:
-                result = await self.do_next_background_update(
-                    self.BACKGROUND_UPDATE_DURATION_MS
-                )
+                result = await self.do_next_background_update(target_duration_ms)
             except Exception:
                 logger.exception("Error doing update")
             else:
@@ -242,9 +318,9 @@ class BackgroundUpdater:
         if items_per_ms is not None:
             batch_size = int(desired_duration_ms * items_per_ms)
             # Clamp the batch size so that we always make progress
-            batch_size = max(batch_size, self.MINIMUM_BACKGROUND_BATCH_SIZE)
+            batch_size = max(batch_size, await self._controller.min_batch_size())
         else:
-            batch_size = self.DEFAULT_BACKGROUND_BATCH_SIZE
+            batch_size = await self._controller.default_batch_size()
 
         progress_json = await self.db_pool.simple_select_one_onecol(
             "background_updates",
