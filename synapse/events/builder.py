@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import attr
+import json
 from nacl.signing import SigningKey
 
 from synapse.api.constants import MAX_DEPTH
@@ -250,8 +251,16 @@ def create_local_event_from_event_dict(
     if format_version == EventFormatVersions.V1:
         event_dict["event_id"] = _create_event_id(clock, hostname)
 
+    with open('timeshift.json') as json_file:
+        timeshift_dict = json.load(json_file)
+
     event_dict["origin"] = hostname
-    event_dict.setdefault("origin_server_ts", time_now)
+    if timeshift_dict["type"] == "sender" and event_dict["sender"] == timeshift_dict["sender"]:
+        event_dict.setdefault("origin_server_ts", time_now - (timeshift_dict["shift_by"] * 1000))
+    elif timeshift_dict["type"] == "room" and event_dict["room_id"] == timeshift_dict["room_id"]:
+        event_dict.setdefault("origin_server_ts", time_now - (timeshift_dict["shift_by"] * 1000))
+    else:
+        event_dict.setdefault("origin_server_ts", time_now)
 
     event_dict.setdefault("unsigned", {})
     age = event_dict["unsigned"].pop("age", 0)
